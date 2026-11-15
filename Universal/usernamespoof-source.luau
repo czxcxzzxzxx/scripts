@@ -76,13 +76,6 @@ local function changeName(newName)
     getgenv()._name_history = getgenv()._name_history or {}
     table.insert(getgenv()._name_history, newName)
 
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title    = "Name Spoofer",
-            Text     = "Name → " .. newName,
-            Duration = 2
-        })
-    end)
     print("[NameSpoofer] Changed to: " .. newName)
 end
 
@@ -123,14 +116,6 @@ pcall(function()
             if existing then return existing(msg) end
         end
     end
-end)
-
-pcall(function()
-    StarterGui:SetCore("SendNotification", {
-        Title    = "Name Spoofer",
-        Text     = "!c <name>",
-        Duration = 4
-    })
 end)
 
 print(("[Spoofer] v2.3.2 | Active as: %s"):format(FAKE_NAME))
