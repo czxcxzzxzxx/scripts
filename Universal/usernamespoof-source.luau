@@ -117,7 +117,3 @@ pcall(function()
         end
     end
 end)
-
-print(("[Spoofer] v2.3.2 | Active as: %s"):format(FAKE_NAME))
-print("[Spoofer] Commands: !c <name>")
-print("Discord: nonfq")
