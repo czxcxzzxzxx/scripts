@@ -1,5 +1,5 @@
 local ok,src=pcall(function()
-    return game:HttpGet"https://raw.githubusercontent.com/nondevelopers/BitchBot-UiLibrary/main/main.luau"
+    return game:HttpGet"https://raw.githubusercontent.com/czxcxzzxzxx/BitchBot-UiLibrary/main/main.luau"
 end)
 assert(ok and type(src)=="string"and#src>1000,"Could not download the UI library from: https://raw.githubusercontent.com/nondevelopers/BitchBot-UiLibrary/main/main.luau")
 local chunk,err=loadstring(src)
