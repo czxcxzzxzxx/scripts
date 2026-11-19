@@ -1,8 +1,3 @@
---[[
-device spoooof
-made by: @nondevelopers
-]]--
-
 local SG = game:GetService("StarterGui")
 local UIS = game:GetService("UserInputService")
 local GS = game:GetService("GuiService")
