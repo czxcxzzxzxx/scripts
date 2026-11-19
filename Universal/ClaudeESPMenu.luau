@@ -1,8 +1,3 @@
---[[
-good esp
-made by: @nondevelopers
-]]--
-
 local genv = (getgenv and getgenv()) or _G
 
 if genv.__ESPMenu then
