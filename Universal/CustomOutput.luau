@@ -1,8 +1,3 @@
---[[
-Custom Output
-made by: @nondevelopers
-]]--
-
 local LogService = game:GetService("LogService")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
