@@ -25,3 +25,7 @@ loadstring(game:HttpGet('https://raw.githubusercontent.com/czxcxzzxzxx/scripts/m
 ```luau
 loadstring(game:HttpGet('https://raw.githubusercontent.com/czxcxzzxzxx/scripts/main/Universal/justlocklol.luau'))()
 ```
+### Rochess autofarm
+```luau
+loadstring(game:HttpGet('https://raw.githubusercontent.com/czxcxzzxzxx/scripts/main/Rochess/autofarm.lua'))()
+```
