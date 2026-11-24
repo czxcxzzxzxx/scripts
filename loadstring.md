@@ -29,3 +29,7 @@ loadstring(game:HttpGet('https://raw.githubusercontent.com/czxcxzzxzxx/scripts/m
 ```luau
 loadstring(game:HttpGet('https://raw.githubusercontent.com/czxcxzzxzxx/scripts/main/Rochess/autofarm.lua'))()
 ```
+### custom chat
+```luau
+loadstring(game:HttpGet('https://raw.githubusercontent.com/czxcxzzxzxx/scripts/main/Universal/custom_chat.lua'))()
+```
