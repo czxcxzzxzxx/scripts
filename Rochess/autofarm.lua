@@ -1,5 +1,7 @@
 -- made with claude.
 
+local SOURCE = [===[
+local SELF_SOURCE = ...
 if getgenv().RoChessFarm and getgenv().RoChessFarm.Stop then
     pcall(getgenv().RoChessFarm.Stop)
     task.wait(0.3)
@@ -11,8 +13,6 @@ local Configs = {
     ShowArrow = true,
     ShowEval = true,
     ReExecute = true,
-    ScriptUrl = "",
-    ScriptFile = "RoChessStockfish.lua",
     AntiAfk = true,
     ThinkTime = 6,
 
@@ -89,7 +89,8 @@ loadSettings()
 local STOP_FLAG = "RoChessFarm_stop"
 local queueTeleport = queue_on_teleport or queueonteleport
     or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-local reloadQueued = false
+local reloadStatus = "starting"
+local teleQueued = false
 
 local function setStopFlag(on)
     if not (writefile and isfile) then return end
@@ -103,35 +104,51 @@ local function setStopFlag(on)
 end
 
 local function buildReloader()
-    local loader
-    if Configs.ScriptUrl ~= "" then
-        loader = string.format("loadstring(game:HttpGet(%q))()", Configs.ScriptUrl)
-    elseif Configs.ScriptFile ~= "" and isfile and isfile(Configs.ScriptFile) then
-        loader = string.format("loadstring(readfile(%q))()", Configs.ScriptFile)
-    end
-    if not loader then return nil end
-    return string.format("if not game:IsLoaded() then game.Loaded:Wait() end\nif isfile and isfile(%q) then return end\n%s\n", STOP_FLAG, loader)
+    if type(SELF_SOURCE) ~= "string" then return nil end
+    return string.format(
+        "if not game:IsLoaded() then game.Loaded:Wait() end\n"
+        .. "if game.GameId ~= %d then return end\n"
+        .. "if getgenv().RoChessFarm then return end\n"
+        .. "if isfile and isfile(%q) then return end\n"
+        .. "local S = %s\nloadstring(S)(S)\n",
+        game.GameId, STOP_FLAG, string.format("%q", SELF_SOURCE))
 end
 
 local function queueReload()
-    if reloadQueued or not Configs.ReExecute then return end
+    if not Configs.ReExecute then
+        reloadStatus = "off"
+        return
+    end
     if not queueTeleport then
-        log("re-execute unavailable: executor has no queue_on_teleport")
+        reloadStatus = "executor has no queue_on_teleport"
         return
     end
     local code = buildReloader()
     if not code then
-        log("re-execute not set up: fill in Configs.ScriptUrl, or save this script in your workspace as " .. Configs.ScriptFile)
+        reloadStatus = "needs the full script file"
         return
     end
     if pcall(queueTeleport, code) then
-        reloadQueued = true
-        log("will re-execute after a server hop")
+        reloadStatus = "armed"
+    else
+        reloadStatus = "queue failed"
     end
 end
 
 setStopFlag(false)
 queueReload()
+
+track(LocalPlayer.OnTeleport:Connect(function(state)
+    log("teleport state: " .. tostring(state))
+    if state == Enum.TeleportState.Failed then
+        teleQueued = false
+        return
+    end
+    if not teleQueued and (state == Enum.TeleportState.RequestedFromServer or state == Enum.TeleportState.Started) then
+        teleQueued = true
+        queueReload()
+    end
+end))
 
 local function pingAfk()
     pcall(function()
@@ -389,7 +406,9 @@ local FROM_COLOR = Color3.fromRGB(240, 210, 60)
 
 local BOARD_KEYS = {"frame", "flipped", "sqPx", "arrowLayer", "pieceLayer", "squares"}
 local boardObj
+local frameCache
 local lastDetect = 0
+local lastScan = 0
 
 local function validBoard(b)
     if type(b) ~= "table" then return false end
@@ -400,18 +419,48 @@ local function validBoard(b)
 end
 
 local function findBoardObject()
-    if not filtergc then return nil end
-    local ok, found = pcall(filtergc, "table", { Keys = BOARD_KEYS }, true)
-    if ok and validBoard(found) then return found end
-    return nil
+    if not filtergc then return nil, "no filtergc" end
+    local ok, res = pcall(filtergc, "table", { Keys = BOARD_KEYS }, false)
+    if not ok then return nil, "filtergc error" end
+    local list = {}
+    if type(res) == "table" then
+        if res.frame ~= nil then list[1] = res else list = res end
+    end
+    local best, bestSize
+    for _, b in ipairs(list) do
+        if validBoard(b) then
+            local okv, size = pcall(function()
+                return b.frame.Visible and b.frame.AbsoluteSize.X or -1
+            end)
+            size = okv and size or -1
+            if not best or size > bestSize then best, bestSize = b, size end
+        end
+    end
+    return best, "filtergc matches: " .. #list
 end
 
 local function findBoardFrame()
+    if frameCache and frameCache.Parent then return frameCache end
+    frameCache = nil
+    if os.clock() - lastScan < 2 then return nil end
+    lastScan = os.clock()
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    local ui = pg and pg:FindFirstChild("ChessUI")
+    if not pg then return nil end
+    local ui = pg:FindFirstChild("ChessUI")
     local root = ui and ui:FindFirstChild("Root")
     local f = root and root:FindFirstChild("Board")
-    if f and f:IsA("GuiObject") then return f end
+    if not f then
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d.Name == "Board" and d:IsA("Frame") and d:FindFirstChild("Squares") and d:FindFirstChild("Pieces") then
+                f = d
+                break
+            end
+        end
+    end
+    if f and f:IsA("GuiObject") then
+        frameCache = f
+        return f
+    end
     return nil
 end
 
@@ -425,7 +474,9 @@ local function getBoard()
     if boardObj and not validBoard(boardObj) then boardObj = nil end
     if not boardObj and os.clock() - lastDetect > 2 then
         lastDetect = os.clock()
-        boardObj = findBoardObject()
+        local info
+        boardObj, info = findBoardObject()
+        S.boardInfo = info
     end
     if boardObj then
         S.boardMode = "native"
@@ -439,6 +490,18 @@ local function getBoard()
     S.boardMode = "not found"
     return nil
 end
+
+task.spawn(function()
+    local last
+    while alive do
+        pcall(getBoard)
+        if S.boardMode ~= last then
+            last = S.boardMode
+            log("board: " .. tostring(last), S.boardInfo or "")
+        end
+        task.wait(1)
+    end
+end)
 
 local arrowKey
 local function clearArrow()
@@ -766,19 +829,23 @@ addCheckbox("Best Move Arrow", "ShowArrow")
 addCheckbox("Show Eval (winning/losing)", "ShowEval")
 addCheckbox("Auto Queue", "AutoQueue")
 addCheckbox("Anti-AFK", "AntiAfk")
-addCheckbox("Re-execute on server hop", "ReExecute", function(on)
+addCheckbox("Re-execute on server move", "ReExecute", function(on)
     setStopFlag(not on)
-    if on then queueReload() end
+    if on then queueReload() else reloadStatus = "off" end
 end)
+local reloadLabel = addLabel("", C.dim, true)
 addSeparator()
 local boardLabel = addLabel("Board: not found", C.dim, true)
 addButton("Re-detect board", function()
     boardObj = nil
+    frameCache = nil
     lastDetect = 0
+    lastScan = 0
     arrowKey = nil
 end)
 addSeparator()
-addLabel("RightShift / RC button = hide or show", C.dim, true)
+local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
+addLabel(isMobile and "RC button = hide or show" or "RightShift = hide or show", C.dim, true)
 
 local function Stop()
     alive = false
@@ -796,6 +863,7 @@ local toggleBtn = new("TextButton", {
     Text = "RC", Font = FONT, TextSize = 14, TextColor3 = C.text, BackgroundColor3 = C.title,
     BorderSizePixel = 0, Size = UDim2.fromOffset(36, 36), Position = UDim2.new(0, 6, 0.5, -18),
 }, uiGui)
+toggleBtn.Visible = isMobile
 toggleBtn.Activated:Connect(function() window.Visible = not window.Visible end)
 track(UIS.InputBegan:Connect(function(i, gp)
     if not gp and i.KeyCode == Enum.KeyCode.RightShift then window.Visible = not window.Visible end
@@ -804,8 +872,9 @@ end))
 task.spawn(function()
     while alive do
         statusLabel.Text = "Status: " .. S.status
-        boardLabel.Text = "Board: " .. S.boardMode
+        boardLabel.Text = "Board: " .. S.boardMode .. (S.boardMode == "not found" and S.boardInfo and (" (" .. S.boardInfo .. ")") or "")
         evalRow.Visible = Configs.ShowEval
+        reloadLabel.Text = "Re-execute: " .. (Configs.ReExecute and reloadStatus or "off")
         if Configs.ShowEval then
             evalLabel.Text = evalText(S.evalUs, S.mateUs)
             evalFill.Size = UDim2.fromScale(winPct(S.evalUs, S.mateUs) / 100, 1)
@@ -920,3 +989,5 @@ end)
 
 getgenv().RoChessFarm = { Stop = Stop, Configs = Configs, State = S }
 log("RoChess AutoFarm v3.2 loaded. Stop with getgenv().RoChessFarm.Stop()")
+]===]
+loadstring(SOURCE)(SOURCE)
