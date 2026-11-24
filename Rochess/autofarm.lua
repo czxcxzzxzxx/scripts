@@ -10,9 +10,6 @@ local Configs = {
     AutoQueue = false,
     ShowArrow = true,
     ShowEval = true,
-    ReExecute = true,
-    ScriptUrl = "",
-    ScriptFile = "RoChessStockfish.lua",
     AntiAfk = true,
     ThinkTime = 6,
 
@@ -59,7 +56,7 @@ local function track(conn)
 end
 
 local SAVE_FILE = "RoChessFarm.json"
-local SAVE_KEYS = {"AutoMove", "AutoQueue", "ShowArrow", "ShowEval", "ReExecute", "AntiAfk", "ThinkTime"}
+local SAVE_KEYS = {"AutoMove", "AutoQueue", "ShowArrow", "ShowEval", "AntiAfk", "ThinkTime"}
 
 local function loadSettings()
     if not (isfile and readfile) then return end
@@ -85,53 +82,6 @@ local function saveSettings()
 end
 
 loadSettings()
-
-local STOP_FLAG = "RoChessFarm_stop"
-local queueTeleport = queue_on_teleport or queueonteleport
-    or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-local reloadQueued = false
-
-local function setStopFlag(on)
-    if not (writefile and isfile) then return end
-    pcall(function()
-        if on then
-            writefile(STOP_FLAG, "1")
-        elseif isfile(STOP_FLAG) and delfile then
-            delfile(STOP_FLAG)
-        end
-    end)
-end
-
-local function buildReloader()
-    local loader
-    if Configs.ScriptUrl ~= "" then
-        loader = string.format("loadstring(game:HttpGet(%q))()", Configs.ScriptUrl)
-    elseif Configs.ScriptFile ~= "" and isfile and isfile(Configs.ScriptFile) then
-        loader = string.format("loadstring(readfile(%q))()", Configs.ScriptFile)
-    end
-    if not loader then return nil end
-    return string.format("if not game:IsLoaded() then game.Loaded:Wait() end\nif isfile and isfile(%q) then return end\n%s\n", STOP_FLAG, loader)
-end
-
-local function queueReload()
-    if reloadQueued or not Configs.ReExecute then return end
-    if not queueTeleport then
-        log("re-execute unavailable: executor has no queue_on_teleport")
-        return
-    end
-    local code = buildReloader()
-    if not code then
-        log("re-execute not set up: fill in Configs.ScriptUrl, or save this script in your workspace as " .. Configs.ScriptFile)
-        return
-    end
-    if pcall(queueTeleport, code) then
-        reloadQueued = true
-        log("will re-execute after a server hop")
-    end
-end
-
-setStopFlag(false)
-queueReload()
 
 local function pingAfk()
     pcall(function()
@@ -766,10 +716,6 @@ addCheckbox("Best Move Arrow", "ShowArrow")
 addCheckbox("Show Eval (winning/losing)", "ShowEval")
 addCheckbox("Auto Queue", "AutoQueue")
 addCheckbox("Anti-AFK", "AntiAfk")
-addCheckbox("Re-execute on server hop", "ReExecute", function(on)
-    setStopFlag(not on)
-    if on then queueReload() end
-end)
 addSeparator()
 local boardLabel = addLabel("Board: not found", C.dim, true)
 addButton("Re-detect board", function()
@@ -782,7 +728,6 @@ addLabel("RightShift / RC button = hide or show", C.dim, true)
 
 local function Stop()
     alive = false
-    setStopFlag(true)
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     table.clear(connections)
     for _, g in ipairs(guis) do pcall(function() g:Destroy() end) end
