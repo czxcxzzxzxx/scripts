@@ -1,7 +1,6 @@
--- Online Chat client (WebSocket with automatic HTTP-poll fallback)
 local env, HttpService, UIS, lp, CHANNELS, WS_URL, MAX_LEN, MIN_W
 local MIN_H, TITLE_H, SIDE_W, GIF_MAX_W, GIF_MAX_H, TICK, FENCE, req
-local hasWS, copyFn, HWID, alive, banned, conns, bind, toggleKey
+local connectChatSocket, chatConnectionError, copyFn, alive, banned, conns, bind, toggleKey
 local textSize, saveSettings, CATS, EMOJI, ALL, QUICK_REACTIONS, emojify, clip
 local api, getAsset, C, UiFont, BodyFont, new, round, tween
 local esc, nameColor, Lucide48, lucideIcon, hover, fadeIn, popIn, sizedLabels
@@ -42,17 +41,66 @@ do
 	FENCE = string.rep(TICK, 3)
 
 	req = request or http_request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
-	hasWS = (WebSocket and WebSocket.connect) and true or false
 	copyFn = (type(setclipboard) == "function" and setclipboard) or (type(toclipboard) == "function" and toclipboard) or nil
 
-	-- hardware id (used by server-side bans)
-	HWID = ""
-	do
+	-- Use a device ID from the runtime that matches the Worker's allowed formats.
+	local hex4 = string.rep("%x", 4)
+	local uuidPattern = "^" .. table.concat({ hex4 .. hex4, hex4, hex4, hex4, hex4:rep(3) }, "%-") .. "$"
+	local function isHwid(value)
+		return type(value) == "string" and (
+			(#value == 128 and value:match("^%x+$") ~= nil) or value:match(uuidPattern) ~= nil
+		)
+	end
+	local hwid
+	if type(gethwid) == "function" then
+		local ok, value = pcall(gethwid)
+		if ok and isHwid(value) then hwid = value end
+	end
+	if not hwid then
 		local ok, v = pcall(function()
-			if gethwid then return gethwid() end
 			return game:GetService("RbxAnalyticsService"):GetClientId()
 		end)
-		if ok and type(v) == "string" then HWID = v end
+		if ok and isHwid(v) then hwid = v end
+	end
+	if not hwid then
+		chatConnectionError = "Chat requires a device ID in UUID or 128-character hex format."
+	end
+
+	local gameId = string.format("%.0f", game.GameId)
+	local sessionId = game.JobId
+	if sessionId == "" then sessionId = HttpService:GenerateGUID(false) end
+
+	local function chatHeaders()
+		return {
+			["x-uid"] = string.format("%.0f", lp.UserId),
+			["x-user"] = lp.Name,
+			["x-hwid"] = hwid,
+			["Roblox-Game-Id"] = gameId,
+			["Roblox-Session-Id"] = sessionId,
+		}
+	end
+
+	local socketApi = WebSocket or websocket
+	local socketConnect = socketApi and (socketApi.connect or socketApi.Connect)
+	if type(socketConnect) == "function" then
+		local headerMode
+		function connectChatSocket()
+			if headerMode ~= "direct" then
+				local ok, socket = pcall(socketConnect, WS_URL, { Headers = chatHeaders() })
+				if ok and socket then
+					headerMode = "options"
+					return socket
+				end
+			end
+			if headerMode ~= "options" then
+				local ok, socket = pcall(socketConnect, WS_URL, chatHeaders())
+				if ok and socket then
+					headerMode = "direct"
+					return socket
+				end
+			end
+			return nil
+		end
 	end
 
 	alive = true
@@ -207,21 +255,19 @@ do
 
 	-- ---------- http ----------
 	function api(method, path, body)
+		if chatConnectionError then return nil, { error = chatConnectionError } end
 		if not req then return nil end
+		local headers = chatHeaders()
+		headers["Content-Type"] = "application/json"
 		local ok, res = pcall(req, {
 			Url = SERVER .. path,
 			Method = method,
-			Headers = {
-				["Content-Type"] = "application/json",
-				["x-uid"] = tostring(lp.UserId),
-				["x-user"] = lp.Name,
-				["x-hwid"] = HWID,
-			},
+			Headers = headers,
 			Body = body and HttpService:JSONEncode(body) or nil,
 		})
 		if not ok or type(res) ~= "table" then return nil end
 		local dok, data = pcall(HttpService.JSONDecode, HttpService, res.Body or "")
-		return res.StatusCode, dok and data or nil
+		return tonumber(res.StatusCode), dok and type(data) == "table" and data or nil
 	end
 
 	-- ---------- download cache (GIF previews / clips) ----------
@@ -2664,6 +2710,8 @@ do
 		local ok, d = pcall(HttpService.JSONDecode, HttpService, raw)
 		if not ok or type(d) ~= "table" then return end
 		if d.t == "hist" then
+			wsLive = true
+			setStatus("online")
 			for _, m in ipairs(d.msgs or {}) do addMessage(m, true) end
 			lastClear = math.max(lastClear, tonumber(d.cs) or 0)
 			clearBaselined = true
@@ -2826,26 +2874,41 @@ do
 		box:CaptureFocus()
 	end
 
-	if hasWS then
+	if connectChatSocket and not chatConnectionError then
 		task.spawn(function()
 			while alive and not banned do
-				local ok, sock = pcall(WebSocket.connect, WS_URL)
-				if ok and sock then
+				local sock = connectChatSocket()
+				if sock then
+					if not alive or banned then
+						pcall(function() sock:Close() end)
+						break
+					end
+
 					local closed = false
-					sock.OnMessage:Connect(function(raw)
+					ws = sock
+					local onMessage = sock.OnMessage:Connect(function(raw)
 						if alive and ws == sock then handle(raw) end
 					end)
-					sock.OnClose:Connect(function() closed = true end)
-					ws, wsLive = sock, true
-					setStatus("online")
-					pcall(function()
-						sock:Send(HttpService:JSONEncode({ t = "hello", user = lp.Name, userId = lp.UserId, hwid = HWID }))
+					local onClose = sock.OnClose:Connect(function()
+						closed = true
+						if ws == sock then wsLive = false end
 					end)
-					while alive and not closed do task.wait(1) end
+					local helloOk, sent = pcall(function()
+						return sock:Send(HttpService:JSONEncode({ t = "hello" }))
+					end)
+					if helloOk and sent ~= false then
+						local deadline = os.clock() + 8
+						while alive and not banned and not closed and (wsLive or os.clock() < deadline) do
+							task.wait(0.25)
+						end
+					end
 					wsLive, ws = false, nil
+					pcall(function() onMessage:Disconnect() end)
+					pcall(function() onClose:Disconnect() end)
 					pcall(function() sock:Close() end)
 				end
-				if banned then break end
+				if not alive or banned then break end
+				if not req then setStatus("offline") end
 				task.wait(8)
 			end
 		end)
@@ -2861,6 +2924,8 @@ do
 
 	-- HTTP fallback (only runs while the websocket isn't live)
 	task.spawn(function()
+		if not req or chatConnectionError then return end
+		local lastPollError
 		while alive and not banned do
 			if not wsLive then
 				local first = lastId == 0
@@ -2869,6 +2934,7 @@ do
 				if wsLive then
 					-- websocket came up while we were waiting
 				elseif code == 200 and data then
+					lastPollError = nil
 					setStatus("fallback")
 					for _, m in ipairs(data.msgs or {}) do addMessage(m, first) end
 					for _, id in ipairs(data.dels or {}) do removeMessage(id) end
@@ -2896,6 +2962,11 @@ do
 					onBanned(data.error)
 				else
 					setStatus("offline")
+					local detail = data and data.error
+					if type(detail) == "string" and detail ~= lastPollError then
+						lastPollError = detail
+						sys(detail)
+					end
 				end
 			end
 			task.wait(1.5)
@@ -3372,8 +3443,13 @@ do
 	bind(closeBtn.Activated, cleanup)
 
 	setChannel("main")
-	setStatus("connecting")
-	if not req then sys("your executor has no request function; chat can't connect") end
+	if chatConnectionError then
+		setStatus("offline")
+		sys(chatConnectionError)
+	elseif not req and not connectChatSocket then
+		setStatus("offline")
+		sys("This runtime has no WebSocket or HTTP request function.")
+	end
 	sys(toggleKey.Name .. " opens and closes the chat. Right-click a message to reply or react.")
 
 end
