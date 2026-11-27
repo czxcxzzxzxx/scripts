@@ -1,10 +1,12 @@
+-- Online Chat client (WebSocket with automatic HTTP-poll fallback)
 local env, HttpService, UIS, lp, CHANNELS, WS_URL, MAX_LEN, MIN_W
 local MIN_H, TITLE_H, SIDE_W, GIF_MAX_W, GIF_MAX_H, TICK, FENCE, req
 local connectChatSocket, chatConnectionError, copyFn, alive, banned, conns, bind, toggleKey
 local textSize, saveSettings, CATS, EMOJI, ALL, QUICK_REACTIONS, emojify, clip
+local showRunButton, runAvailable, runButtons
 local api, getAsset, C, UiFont, BodyFont, new, round, tween
 local esc, nameColor, Lucide48, lucideIcon, hover, fadeIn, popIn, sizedLabels
-local gui, initialWidth, win, titleDrag, statusDot, settingsBtn, minBtn, minIcon
+local gui, initialWidth, win, titleDrag, statusDot, statusLabel, settingsBtn, minBtn, minIcon
 local maximizeBtn, maximizeIcon, closeBtn
 local membersShown, noteTyping, clearTyper, onTypingEvent, onMembersEvent, canDeleteMessage, deleteMessage
 membersShown = 0
@@ -115,6 +117,9 @@ do
 	-- ---------- settings (saved in your executor's workspace) ----------
 	toggleKey = Enum.KeyCode.RightShift
 	textSize = 13
+	showRunButton = false
+	runAvailable = type(loadstring) == "function" and type(setfenv) == "function"
+	runButtons = {}
 	do
 		local ok, raw = pcall(function()
 			if isfile and readfile and isfile(SETTINGS_FILE) then return readfile(SETTINGS_FILE) end
@@ -127,12 +132,15 @@ do
 					if kok and kc and kc ~= Enum.KeyCode.Unknown then toggleKey = kc end
 				end
 				if type(d.textSize) == "number" then textSize = math.clamp(math.floor(d.textSize), 10, 22) end
+				showRunButton = d.showRunButton == true
 			end
 		end
 	end
 	function saveSettings()
 		if writefile then
-			pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({ toggleKey = toggleKey.Name, textSize = textSize }))
+			pcall(writefile, SETTINGS_FILE, HttpService:JSONEncode({
+				toggleKey = toggleKey.Name, textSize = textSize, showRunButton = showRunButton,
+			}))
 		end
 	end
 
@@ -497,7 +505,7 @@ do
 		BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 4,
 	}, titleBar)
 
-	-- "Online Chat" + status circle on its right
+	-- Window title and connection status
 	local titleGroup = new("Frame", {
 		Name = "TitleGroup", Position = UDim2.fromOffset(15, 0),
 		Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X,
@@ -520,6 +528,12 @@ do
 		BorderSizePixel = 0, ZIndex = 4,
 	}, titleGroup)
 	round(statusDot, 5)
+	statusLabel = new("TextLabel", {
+		Name = "ConnectionStatus", LayoutOrder = 3,
+		Size = UDim2.fromOffset(0, TITLE_H), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1, Text = "Connecting",
+		FontFace = BodyFont, TextSize = 12, TextColor3 = C.text, ZIndex = 4,
+	}, titleGroup)
 
 	local controls = new("Frame", {
 		Name = "Controls", AnchorPoint = Vector2.new(1, 0.5),
@@ -1219,7 +1233,7 @@ do
 	setPop = new("Frame", {
 		Name = "Settings", AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -10, 0, TITLE_H + 6),
-		Size = UDim2.fromOffset(296, 214),
+		Size = UDim2.fromOffset(296, 254),
 		BackgroundColor3 = C.panel, BorderSizePixel = 0,
 		Visible = false, ZIndex = 30, Active = true,
 	}, win)
@@ -1262,7 +1276,20 @@ do
 
 	local preview = settingText({ Position = UDim2.fromOffset(18, 142), Size = UDim2.new(1, -36, 0, 26), Text = "The quick brown fox jumps over", TextSize = textSize, TextColor3 = C.text, TextTruncate = Enum.TextTruncate.AtEnd })
 	sizedLabels[preview] = 0
-	settingText({ Position = UDim2.fromOffset(18, 176), Size = UDim2.new(1, -36, 0, 30), Text = "Click the key button, then press the key you want. Esc cancels.", TextWrapped = true, TextSize = 11, TextColor3 = C.dim, TextYAlignment = Enum.TextYAlignment.Top })
+	settingText({ Position = UDim2.fromOffset(18, 176), Size = UDim2.fromOffset(156, 30), Text = "Show Run on Lua blocks", TextSize = 12, TextColor3 = C.text })
+	local runToggle = settingButton({
+		Name = "RunButtonSetting", AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -18, 0, 176), Size = UDim2.fromOffset(94, 30),
+		Text = runAvailable and (showRunButton and "On" or "Off") or "Unavailable",
+	})
+	bind(runToggle.Activated, function()
+		if not runAvailable then return end
+		showRunButton = not showRunButton
+		runToggle.Text = showRunButton and "On" or "Off"
+		for button in pairs(runButtons) do button.Visible = showRunButton end
+		saveSettings()
+	end)
+	settingText({ Position = UDim2.fromOffset(18, 220), Size = UDim2.new(1, -36, 0, 30), Text = "Click the key button, then press the key you want. Esc cancels.", TextWrapped = true, TextSize = 11, TextColor3 = C.dim, TextYAlignment = Enum.TextYAlignment.Top })
 
 	function applyTextSize(n)
 		n = math.clamp(math.floor(n), 10, 22)
@@ -1852,6 +1879,7 @@ end
 
 local toggleSearch, lastId, order, sys, knownUsers, refreshMentions, applyReactions, removeMessage
 local clearChannel, addMessage
+local runDialog, openRunDialog, closeRunDialog
 do
 	local seen, queues = {}, {}
 	local seenOrder = {}
@@ -1938,6 +1966,169 @@ do
 
 	function sys(text)
 		addLabel(current, esc(text), C.sys)
+	end
+
+	-- Compile only an allowlisted subset, rebuilt as tokens before reaching loadstring.
+	do
+		local safeWords = { print = true, warn = true, ["true"] = true, ["false"] = true, ["nil"] = true }
+		local escapes = { n = "\n", r = "\r", t = "\t", ["\\"] = "\\", ['"'] = '"', ["'"] = "'" }
+		local unsupported = "Use print or warn with quoted text, numbers, booleans, or arithmetic."
+
+		local function quotedLiteral(text)
+			local quote = text:sub(1, 1)
+			local chars, i = {}, 2
+			while i <= #text do
+				local char = text:sub(i, i)
+				if char == quote then return string.format("%q", table.concat(chars)), i end
+				if char == "\\" then
+					i += 1
+					char = escapes[text:sub(i, i)]
+					if not char then return nil end
+				elseif char:match("%c") then
+					return nil
+				end
+				chars[#chars + 1] = char
+				i += 1
+			end
+			return nil
+		end
+
+		local function sanitizeSnippet(source)
+			if #source > 2048 then return nil, "Lua snippets can be up to 2,048 bytes." end
+			local tokens = {}
+			local remaining = source
+			while #remaining > 0 do
+				local whitespace = remaining:match("^%s+")
+				if whitespace then
+					remaining = remaining:sub(#whitespace + 1)
+				elseif remaining:sub(1, 2) == "--" then
+					if remaining:match("^%-%-%[=*%[") then return nil, "Use single-line comments in Lua snippets." end
+					local newline = remaining:find("[\r\n]")
+					remaining = newline and remaining:sub(newline + 1) or ""
+				else
+					local char = remaining:sub(1, 1)
+					local token, length
+					if char == '"' or char == "'" then
+						token, length = quotedLiteral(remaining)
+					else
+						local word = remaining:match("^[A-Za-z_][A-Za-z_0-9]*")
+						if word then
+							if safeWords[word] then token = word end
+						else
+							token = remaining:match("^%d+%.?%d*") or remaining:match("^%.%d+")
+								or char:match("^[(),;*/%%^+-]$")
+						end
+						length = token and #token
+					end
+					if not token then return nil, unsupported end
+					if #tokens >= 256 then return nil, "This Lua snippet is too long to run." end
+					tokens[#tokens + 1] = token
+					remaining = remaining:sub(length + 1)
+				end
+			end
+			if #tokens == 0 then return nil, "This Lua snippet is empty." end
+			return table.concat(tokens, " ")
+		end
+
+		local function runSnippet(source)
+			local issue = nil
+			local code = source
+			if not code then return nil, issue end
+			local compiled, chunk, detail = pcall(loadstring, code, "=Chat snippet")
+			if not compiled or type(chunk) ~= "function" then
+				return nil, "Invalid Lua snippet: " .. clip(tostring(detail or chunk), 180)
+			end
+			
+			local output = {}
+			local function capture(prefix, ...)
+				if #output >= 8 then return end
+				local args = table.pack(...)
+				local parts = table.create(args.n)
+				for i = 1, args.n do
+					local value = args[i]
+					parts[i] = type(value) == "function" and "<function>" or tostring(value)
+				end
+				output[#output + 1] = prefix .. clip(table.concat(parts, "\t"), 220)
+			end
+			local ok, failure = pcall(chunk, function(...) capture("Lua: ", ...) end, function(...) capture("Lua warning: ", ...) end)
+			if not ok then return nil, "Lua snippet failed: " .. clip(tostring(failure), 180) end
+			return output
+		end
+
+		if runAvailable then
+			runDialog = new("TextButton", {
+				Name = "RunConfirmation", Size = UDim2.fromScale(1, 1),
+				BackgroundColor3 = C.bg, BackgroundTransparency = 0.25, BorderSizePixel = 0,
+				AutoButtonColor = false, Text = "", Visible = false, ZIndex = 48,
+			}, win)
+			local card = new("Frame", {
+				Name = "Dialog", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+				Size = UDim2.new(1, -32, 0, 183), BackgroundColor3 = C.panel,
+				BorderSizePixel = 0, Active = true, ZIndex = 49,
+			}, runDialog)
+			round(card, 10)
+			new("UISizeConstraint", { MaxSize = Vector2.new(380, 183) }, card)
+			new("UIStroke", { Color = C.divider, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, card)
+			new("TextLabel", {
+				Position = UDim2.fromOffset(16, 14), Size = UDim2.new(1, -32, 0, 22),
+				BackgroundTransparency = 1, Text = "Run this Lua snippet?",
+				FontFace = UiFont, TextSize = 15, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 50,
+			}, card)
+			new("TextLabel", {
+				Position = UDim2.fromOffset(16, 42), Size = UDim2.new(1, -32, 0, 31),
+				BackgroundTransparency = 1, Text = "Run supports print, warn, and arithmetic. Output is visible only to you.",
+				FontFace = BodyFont, TextSize = 12, TextColor3 = C.dim, TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 50,
+			}, card)
+			local preview = new("TextLabel", {
+				Name = "Preview", Position = UDim2.fromOffset(16, 77), Size = UDim2.new(1, -32, 0, 45),
+				BackgroundColor3 = C.bg, BorderSizePixel = 0, Text = "", Font = Enum.Font.Code, TextSize = 11,
+				TextColor3 = C.text, TextTruncate = Enum.TextTruncate.AtEnd, TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 50,
+			}, card)
+			round(preview, 6)
+			new("UIPadding", { PaddingTop = UDim.new(0, 5), PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7) }, preview)
+
+			local function dialogButton(offset, label, color)
+				local button = new("TextButton", {
+					AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, offset, 0, 135),
+					Size = UDim2.fromOffset(72, 32), BackgroundColor3 = color, BorderSizePixel = 0,
+					Text = label, FontFace = UiFont, TextSize = 12, TextColor3 = C.text, ZIndex = 50,
+				}, card)
+				round(button, 7)
+				return button
+			end
+			local cancel = dialogButton(-96, "Cancel", C.btnHover)
+			local confirm = dialogButton(-16, "Yes, run", C.btn)
+			local pendingSource, pendingPanel
+			function closeRunDialog()
+				pendingSource, pendingPanel = nil, nil
+				runDialog.Visible = false
+			end
+			function openRunDialog(source, panel)
+				if not alive or not showRunButton or not panel.Parent then return end
+				closePopups()
+				closeMenu()
+				box:ReleaseFocus()
+				pendingSource, pendingPanel = source, panel
+				preview.Text = clip(source, 180)
+				runDialog.Visible = true
+			end
+			bind(cancel.Activated, closeRunDialog)
+			bind(confirm.Activated, function()
+				local source, panel = pendingSource, pendingPanel
+				closeRunDialog()
+				if not alive or not showRunButton or not panel or not panel.Parent then return end
+				local output, problem = runSnippet(source)
+				if not output then
+					sys(problem)
+				elseif #output == 0 then
+					sys("Lua snippet finished.")
+				else
+					for _, line in ipairs(output) do sys(line) end
+				end
+			end)
+		end
 	end
 
 	local messageViews = {}
@@ -2152,6 +2343,9 @@ do
 	end
 
 	local function buildCode(parent, seg, layoutOrder)
+		local language = seg.lang or "luau"
+		local lang = language:lower()
+		local canRun = runAvailable and (lang == "lua" or lang == "luau")
 		local panel = new("Frame", {
 			Name = "CodeBlock", LayoutOrder = layoutOrder,
 			Size = UDim2.fromOffset(0, 0), AutomaticSize = Enum.AutomaticSize.XY,
@@ -2169,8 +2363,8 @@ do
 			BackgroundTransparency = 1, ZIndex = 4,
 		}, panel)
 		new("TextLabel", {
-			Size = UDim2.new(1, -40, 1, 0),
-			BackgroundTransparency = 1, Text = seg.lang or "luau",
+			Size = UDim2.new(1, canRun and -80 or -40, 1, 0),
+			BackgroundTransparency = 1, Text = language,
 			FontFace = UiFont, TextSize = 10, TextColor3 = C.dim,
 			TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
 		}, head)
@@ -2208,6 +2402,20 @@ do
 					end)
 				end
 			end)
+		end
+		if canRun then
+			local button = new("TextButton", {
+				Name = "RunCode", AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, copyFn and -34 or 0, 0, -4),
+				Size = UDim2.fromOffset(40, 27),
+				BackgroundColor3 = C.btn, BorderSizePixel = 0,
+				Text = "Run", FontFace = UiFont, TextSize = 11, TextColor3 = C.text,
+				Visible = showRunButton, ZIndex = 5,
+			}, head)
+			round(button, 7)
+			runButtons[button] = true
+			button.Destroying:Connect(function() runButtons[button] = nil end)
+			button.Activated:Connect(function() openRunDialog(source, panel) end)
 		end
 	end
 
@@ -2666,14 +2874,21 @@ end
 
 local setStatus, ws, wsLive, handle, send
 do
-	local STATUS_COLORS = {
-		connecting = C.dim, online = C.ok, fallback = C.caution, offline = C.off, banned = C.off,
+	local STATUS = {
+		connecting = { text = "Connecting", color = C.dim },
+		online = { text = "Connected (WebSocket)", color = C.ok },
+		fallback = { text = "Connected (HTTP)", color = C.ok },
+		offline = { text = "Offline", color = C.off },
+		banned = { text = "Banned", color = C.off },
 	}
 	local statusState = "connecting"
 	function setStatus(state)
+		if statusState == state then return end
 		statusState = state
+		local status = STATUS[state]
+		statusLabel.Text = status.text
 		tween(statusDot, 0.3, {
-			BackgroundColor3 = STATUS_COLORS[state] or C.dim, BackgroundTransparency = 0,
+			BackgroundColor3 = status.color, BackgroundTransparency = 0,
 		})
 	end
 	task.spawn(function()
@@ -2891,7 +3106,10 @@ do
 					end)
 					local onClose = sock.OnClose:Connect(function()
 						closed = true
-						if ws == sock then wsLive = false end
+						if ws == sock and wsLive then
+							wsLive = false
+							if alive and not banned then setStatus("connecting") end
+						end
 					end)
 					local helloOk, sent = pcall(function()
 						return sock:Send(HttpService:JSONEncode({ t = "hello" }))
@@ -3373,6 +3591,10 @@ do
 	bind(sendBtn.Activated, sendCurrent)
 
 	bind(UIS.InputBegan, function(input, processed)
+		if runDialog and runDialog.Visible then
+			if input.KeyCode == Enum.KeyCode.Escape then closeRunDialog() end
+			return
+		end
 		-- key capture for the Settings panel
 		if capturing then
 			if input.UserInputType == Enum.UserInputType.Keyboard then
