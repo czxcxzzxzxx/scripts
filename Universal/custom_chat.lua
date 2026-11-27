@@ -7,6 +7,8 @@ local api, getAsset, C, UiFont, BodyFont, new, round, tween
 local esc, nameColor, Lucide48, lucideIcon, hover, fadeIn, popIn, sizedLabels
 local gui, initialWidth, win, titleDrag, statusDot, settingsBtn, minBtn, minIcon
 local maximizeBtn, maximizeIcon, closeBtn
+local membersShown, noteTyping, clearTyper, onTypingEvent, onMembersEvent, canDeleteMessage, deleteMessage
+membersShown = 0
 do
 	local SERVER = "https://nonfq-chat.doorplayz123.workers.dev"
 
@@ -640,18 +642,41 @@ do
 		TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3,
 	}, roomHead)
 
-	presencePill = new("Frame", {
-		Name = "Presence", AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -51, 0.5, 0),
-		Size = UDim2.fromOffset(82, 25),
-		BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 3,
+	presencePill = new("TextButton", {
+		Name = "Players", AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -47, 0.5, 0),
+		Size = UDim2.fromOffset(0, 28), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = C.panel, BackgroundTransparency = 1,
+		BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 3,
 	}, roomHead)
-	countLbl = new("TextLabel", {
-		Name = "Count", Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 1, Text = "-- online",
-		FontFace = BodyFont, TextSize = 11, TextColor3 = C.dim,
-		TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 4,
+	round(presencePill, 14)
+	new("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 11) }, presencePill)
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6),
 	}, presencePill)
+	-- little person icon, drawn from frames (head + shoulders)
+	local personIcon = new("Frame", {
+		LayoutOrder = 1, Size = UDim2.fromOffset(16, 16),
+		BackgroundTransparency = 1, ClipsDescendants = true, ZIndex = 4,
+	}, presencePill)
+	round(new("Frame", {
+		Position = UDim2.fromOffset(5, 1), Size = UDim2.fromOffset(6, 6),
+		BackgroundColor3 = C.text, BorderSizePixel = 0, ZIndex = 5,
+	}, personIcon), 3)
+	round(new("Frame", {
+		Position = UDim2.fromOffset(1, 9), Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = C.text, BorderSizePixel = 0, ZIndex = 5,
+	}, personIcon), 7)
+	countLbl = new("TextLabel", {
+		Name = "Count", LayoutOrder = 2,
+		Size = UDim2.fromOffset(0, 28), AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 1, Text = "--",
+		FontFace = UiFont, TextSize = 12, TextColor3 = C.text, ZIndex = 4,
+	}, presencePill)
+	bind(presencePill.MouseEnter, function() hover(presencePill, 0) end)
+	bind(presencePill.MouseLeave, function() hover(presencePill, 1) end)
 	findButton = new("TextButton", {
 		Name = "FindMessages", AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -11, 0.5, 0),
@@ -811,7 +836,7 @@ do
 	sendIcon = lucideIcon(sendBtn, "arrow-right", 18, C.text, 5)
 
 	pendingReplies = {}
-	composerHeight = 61
+	composerHeight = 72
 	local replyBanner = new("Frame", {
 		Name = "ReplyPreview", Position = UDim2.fromOffset(14, -33),
 		Size = UDim2.new(1, -26, 0, 30),
@@ -1298,8 +1323,20 @@ do
 	end
 	local replyItem = menuItem(50, "reply", "Reply")
 	local copyItem = copyFn and menuItem(82, "copy", "Copy text") or nil
-	local menuHeight = copyFn and 120 or 88
+	local deleteItem = menuItem(copyFn and 114 or 82, "x", "Delete message")
+	deleteItem.Visible = false
+	for _, d in ipairs(deleteItem:GetDescendants()) do
+		if d:IsA("TextLabel") then d.TextColor3 = C.off end
+		if d:IsA("ImageLabel") then d.ImageColor3 = C.off end
+	end
+	local menuBaseHeight = copyFn and 120 or 88
+	local menuHeight = menuBaseHeight
 	menu.Size = UDim2.fromOffset(254, menuHeight)
+	bind(deleteItem.Activated, function()
+		local t = menuTarget
+		closeMenu()
+		if t and deleteMessage then deleteMessage(t) end
+	end)
 
 	bind(replyItem.Activated, function()
 		local t = menuTarget
@@ -1341,6 +1378,10 @@ do
 	function openContextMenu(target, x, y)
 		closePopups()
 		menuTarget = target
+		local canDel = canDeleteMessage ~= nil and canDeleteMessage(target) or false
+		deleteItem.Visible = canDel
+		menuHeight = menuBaseHeight + (canDel and 32 or 0)
+		menu.Size = UDim2.fromOffset(254, menuHeight)
 		local screen = gui.AbsoluteSize
 		local w, h = 254, menuHeight
 		menu.Position = UDim2.fromOffset(
@@ -1403,8 +1444,12 @@ do
 		if sidebarCollapsed or narrow then return 0 end
 		return SIDE_W
 	end
+	local function rightOffset()
+		if win.AbsoluteSize.X < 640 then return 0 end
+		return membersShown
+	end
 	local function maxBubble()
-		local w = win.AbsoluteSize.X - sidebarOffset() - 1
+		local w = win.AbsoluteSize.X - sidebarOffset() - rightOffset() - 1
 		return math.max(170, math.floor((w - 29 - 42 - 12) * 0.9))
 	end
 	local function refreshBounds()
@@ -1430,22 +1475,23 @@ do
 		side.ZIndex = narrow and 9 or 6
 		sidebarIcon.ImageRectOffset = Lucide48[sidebarCollapsed and "arrow-right" or "arrow-left"].Offset
 		roomHead.Position = UDim2.fromOffset(offset, 0)
-		roomHead.Size = UDim2.new(1, -offset, 0, 53)
+		local right = rightOffset()
+		roomHead.Size = UDim2.new(1, -offset - right, 0, 53)
 		row.Position = UDim2.new(0, offset, 1, -composerHeight - 1)
-		row.Size = UDim2.new(1, -offset, 0, composerHeight)
-		boxBg.Size = UDim2.new(1, -73, 0, composerHeight - 21)
-		sendBtn.Position = UDim2.new(1, -12, 1, -51)
+		row.Size = UDim2.new(1, -offset - right, 0, composerHeight)
+		boxBg.Size = UDim2.new(1, -73, 0, composerHeight - 32)
+		sendBtn.Position = UDim2.new(1, -12, 1, -62)
 		for _, list in pairs(lists) do
 			list.Position = UDim2.fromOffset(offset + 1, 53)
-			list.Size = UDim2.new(1, -offset - 1, 1, -55 - composerHeight)
+			list.Size = UDim2.new(1, -offset - right - 1, 1, -55 - composerHeight)
 		end
-		local available = win.AbsoluteSize.X - offset
+		local available = win.AbsoluteSize.X - offset - right
 		roomName.Size = UDim2.new(1, available < 365 and -105 or -215, 1, 0)
 		presencePill.Visible = not searchOpen and available >= 365
 		findButton.Position = UDim2.new(1, -11, 0.5, 0)
 		local popY = -(composerHeight + 10)
-		emojiPop.Position = UDim2.new(1, -14, 1, popY)
-		gifPop.Position = UDim2.new(1, -14, 1, popY)
+		emojiPop.Position = UDim2.new(1, -14 - right, 1, popY)
+		gifPop.Position = UDim2.new(1, -14 - right, 1, popY)
 		if updateJump then updateJump() end
 		boundTicket += 1
 		local ticket = boundTicket
@@ -1515,6 +1561,7 @@ do
 	updateJump = function()
 		local list = lists[current]
 		if not list or not alive then return end
+		jumpButton.Position = UDim2.new(1, -14 - rightOffset(), 1, -(composerHeight + 9))
 		local show = not searchOpen and not followLatest[current] and not atBottom(list)
 		if show and not jumpButton.Visible then
 			jumpScale.Scale = 0.85
@@ -2212,6 +2259,7 @@ do
 		if message.id > lastId then lastId = message.id end
 
 		local channelId = lists[message.ch] and message.ch or "main"
+		if clearTyper then clearTyper(channelId, message.userId) end
 		local mine = message.userId == lp.UserId
 		local user = clip(type(message.user) == "string" and message.user or "Unknown", 48)
 		local raw = clip(type(message.text) == "string" and message.text or "", MAX_LEN)
@@ -2485,12 +2533,22 @@ do
 				end
 			end)
 		end
+		local delB = actionButton(4)
+		delB.Visible = false
+		lucideIcon(delB, "x", 14, C.off, 10)
+		delB.Activated:Connect(function()
+			if alive and deleteMessage then actions.Visible = false; deleteMessage(view) end
+		end)
 		local function placeActions()
 			if not (bubble.Parent and node.Parent) then return end
+			local canDel = canDeleteMessage ~= nil and canDeleteMessage(view) or false
+			delB.Visible = canDel
+			local barW = actionsW + (canDel and 30 or 0)
+			actions.Size = UDim2.fromOffset(barW, 30)
 			local bx = bubble.AbsolutePosition.X - node.AbsolutePosition.X
 			local by = bubble.AbsolutePosition.Y - node.AbsolutePosition.Y
 			actions.Position = UDim2.fromOffset(
-				math.max(0, bx + bubble.AbsoluteSize.X - actionsW - 6), by - 16)
+				math.max(0, bx + bubble.AbsoluteSize.X - barW - 6), by - 16)
 		end
 		local overNode, overActions = false, false
 		local function refreshActions()
@@ -2586,7 +2644,7 @@ do
 	end)
 
 	local function setCount(n)
-		if type(n) == "number" then countLbl.Text = tostring(n) .. " online" end
+		if type(n) == "number" then countLbl.Text = tostring(n) end
 	end
 
 	-- ---------- network ----------
@@ -2621,6 +2679,10 @@ do
 			applyReactions(d.ch, d.id, d.r)
 		elseif d.t == "count" then
 			setCount(d.n)
+		elseif d.t == "typing" then
+			if onTypingEvent then onTypingEvent(d.ch, d.userId, d.user) end
+		elseif d.t == "members" then
+			if onMembersEvent then onMembersEvent(d.list) end
 		elseif d.t == "sys" then
 			sys(d.text)
 		elseif d.t == "err" then
@@ -2826,6 +2888,9 @@ do
 							end
 						end
 					end
+					for _, x in ipairs(data.typing or {}) do
+						if type(x) == "table" then onTypingEvent(x.ch, x.userId, x.user) end
+					end
 					setCount(data.n)
 				elseif code == 403 and data and data.banned then
 					onBanned(data.error)
@@ -2836,6 +2901,208 @@ do
 			task.wait(1.5)
 		end
 	end)
+
+	do
+		-- ---------- typing indicator ----------
+		local typers = {} -- channel -> userId -> { name, untilT }
+		for _, channel in ipairs(CHANNELS) do typers[channel.id] = {} end
+		local typingLabel = new("TextLabel", {
+			Name = "Typing", AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 16, 1, -3), Size = UDim2.new(1, -110, 0, 16),
+			BackgroundTransparency = 1, Text = "", FontFace = BodyFont, TextSize = 11,
+			TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 5,
+		}, row)
+		local function refreshTyping()
+			local names, now = {}, os.clock()
+			for uid, t in pairs(typers[current]) do
+				if t.untilT > now then names[#names + 1] = t.name else typers[current][uid] = nil end
+			end
+			table.sort(names)
+			local text = ""
+			if #names == 1 then
+				text = names[1] .. " is typing..."
+			elseif #names == 2 then
+				text = names[1] .. " and " .. names[2] .. " are typing..."
+			elseif #names == 3 then
+				text = names[1] .. ", " .. names[2] .. " and " .. names[3] .. " are typing..."
+			elseif #names > 3 then
+				text = "Several people are typing..."
+			end
+			if typingLabel.Text ~= text then
+				typingLabel.Text = text
+				typingLabel.TextTransparency = 1
+				tween(typingLabel, 0.2, { TextTransparency = 0 })
+			end
+		end
+		function onTypingEvent(ch, uid, name)
+			if uid == lp.UserId or not typers[ch] or type(uid) ~= "number" then return end
+			typers[ch][uid] = { name = tostring(name):sub(1, 24), untilT = os.clock() + 5 }
+			if ch == current then refreshTyping() end
+		end
+		function clearTyper(ch, uid)
+			if typers[ch] and typers[ch][uid] then
+				typers[ch][uid] = nil
+				if ch == current then refreshTyping() end
+			end
+		end
+		task.spawn(function()
+			while alive do
+				task.wait(0.6)
+				refreshTyping()
+			end
+		end)
+		local lastTypingSent = 0
+		function noteTyping()
+			if banned then return end
+			local text = box.Text
+			if text == "" or text:sub(1, 1) == "/" then return end
+			local now = os.clock()
+			if now - lastTypingSent < 3 then return end
+			lastTypingSent = now
+			local payload = { t = "typing", ch = current, user = lp.Name, userId = lp.UserId }
+			if wsSend(payload) then return end
+			if req then task.spawn(function() api("POST", "/typing", payload) end) end
+		end
+
+		-- ---------- player list (right panel, most active first) ----------
+		local MEMBERS_W = 214
+		local membersOpen = false
+		local membersPanel = new("Frame", {
+			Name = "PlayerList", Position = UDim2.new(1, 0, 0, 0), Size = UDim2.new(0, MEMBERS_W, 1, 0),
+			BackgroundColor3 = C.bg, BorderSizePixel = 0, Visible = false, ZIndex = 6,
+		}, body)
+		new("Frame", {
+			Name = "Divider", Size = UDim2.new(0, 1, 1, 0),
+			BackgroundColor3 = C.divider, BackgroundTransparency = 0.45, BorderSizePixel = 0, ZIndex = 7,
+		}, membersPanel)
+		new("TextLabel", {
+			Position = UDim2.fromOffset(16, 16), Size = UDim2.new(1, -32, 0, 18),
+			BackgroundTransparency = 1, Text = "Players", FontFace = UiFont, TextSize = 13,
+			TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+		}, membersPanel)
+		local membersSub = new("TextLabel", {
+			Position = UDim2.fromOffset(16, 34), Size = UDim2.new(1, -32, 0, 14),
+			BackgroundTransparency = 1, Text = "Most active first", FontFace = BodyFont, TextSize = 10,
+			TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+		}, membersPanel)
+		local membersList = new("ScrollingFrame", {
+			Position = UDim2.fromOffset(6, 58), Size = UDim2.new(1, -12, 1, -66),
+			BackgroundTransparency = 1, BorderSizePixel = 0,
+			ScrollBarThickness = 3, ScrollBarImageColor3 = C.divider,
+			CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ZIndex = 7,
+		}, membersPanel)
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2) }, membersList)
+
+		function onMembersEvent(list)
+			if type(list) ~= "table" or not alive then return end
+			for _, c in ipairs(membersList:GetChildren()) do
+				if c:IsA("Frame") then c:Destroy() end
+			end
+			membersSub.Text = tostring(#list) .. " online  ·  most active first"
+			for i, p in ipairs(list) do
+				if type(p) == "table" and type(p.id) == "number" then
+					local mine = p.id == lp.UserId
+					local entry = new("Frame", {
+						LayoutOrder = i, Size = UDim2.new(1, 0, 0, 42),
+						BackgroundColor3 = C.panel, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 8,
+					}, membersList)
+					round(entry, 8)
+					new("TextLabel", {
+						Position = UDim2.fromOffset(4, 0), Size = UDim2.fromOffset(20, 42),
+						BackgroundTransparency = 1, Text = tostring(i), FontFace = UiFont, TextSize = 11,
+						TextColor3 = i == 1 and C.accent or C.dim, ZIndex = 9,
+					}, entry)
+					local face = new("ImageLabel", {
+						Position = UDim2.fromOffset(28, 6), Size = UDim2.fromOffset(30, 30),
+						BackgroundColor3 = C.btn, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop,
+						Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(p.id) .. "&w=150&h=150", ZIndex = 9,
+					}, entry)
+					round(face, 8)
+					new("TextLabel", {
+						Position = UDim2.fromOffset(66, 5), Size = UDim2.new(1, -72, 0, 17),
+						BackgroundTransparency = 1, Text = tostring(p.n or p.id) .. (mine and "  (you)" or ""),
+						FontFace = UiFont, TextSize = 12, TextColor3 = mine and C.mine or C.text,
+						TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
+					}, entry)
+					new("TextLabel", {
+						Position = UDim2.fromOffset(66, 22), Size = UDim2.new(1, -72, 0, 14),
+						BackgroundTransparency = 1, Text = tostring(tonumber(p.m) or 0) .. " messages",
+						FontFace = BodyFont, TextSize = 10, TextColor3 = C.dim,
+						TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 9,
+					}, entry)
+					entry.MouseEnter:Connect(function() tween(entry, 0.12, { BackgroundTransparency = 0.4 }) end)
+					entry.MouseLeave:Connect(function() tween(entry, 0.12, { BackgroundTransparency = 1 }) end)
+				end
+			end
+		end
+
+		local function requestMembers()
+			if wsSend({ t = "members" }) then return end
+			if not req then return end
+			task.spawn(function()
+				local code, data = api("GET", "/members")
+				if alive and code == 200 and type(data) == "table" then onMembersEvent(data.list) end
+			end)
+		end
+		-- the panel slides in; the chat area shrinks with it (layoutWorkspace reads membersShown)
+		local shownValue = Instance.new("NumberValue")
+		bind(shownValue.Changed, function(v)
+			membersShown = v
+			membersPanel.Position = UDim2.new(1, -v, 0, 0)
+			membersPanel.Visible = v > 0.5
+			layoutWorkspace()
+		end)
+		local function setMembersOpen(open)
+			membersOpen = open
+			tween(shownValue, 0.28, { Value = open and MEMBERS_W or 0 })
+			tween(presencePill, 0.17, { BackgroundTransparency = open and 0 or 1 })
+			if open then requestMembers() end
+		end
+		bind(presencePill.Activated, function() setMembersOpen(not membersOpen) end)
+		task.spawn(function()
+			while alive do
+				task.wait(8)
+				if membersOpen and win.Visible then requestMembers() end
+			end
+		end)
+
+		-- ---------- deleting messages ----------
+		-- your own messages can always be deleted; an add-on script that registered ChatHooks.command
+		-- can also delete other people's messages (the server decides whether it is allowed)
+		local function hasCommandHook()
+			local hooks = env.ChatHooks
+			return type(hooks) == "table" and type(hooks.command) == "function"
+		end
+		function canDeleteMessage(view)
+			return view ~= nil and (view.userId == lp.UserId or hasCommandHook())
+		end
+		function deleteMessage(view)
+			if banned or not view then return end
+			if view.userId == lp.UserId then
+				local payload = { t = "delete", ch = view.channelId, id = view.id, user = lp.Name, userId = lp.UserId }
+				if wsSend(payload) then return end
+				if not req then return end
+				task.spawn(function()
+					local code, data = api("POST", "/delete", payload)
+					if not alive then return end
+					if code == 200 then
+						removeMessage(view.id)
+					else
+						sys((data and data.error) or ("Delete failed (" .. tostring(code) .. ")"))
+					end
+				end)
+			elseif hasCommandHook() then
+				local handler = env.ChatHooks.command
+				task.spawn(function()
+					local ok, err = pcall(handler, "/delmsg " .. tostring(view.id),
+						{ request = api, sys = sys, channel = view.channelId })
+					if not ok then sys("Delete failed: " .. tostring(err)) end
+				end)
+			end
+		end
+
+	end
 
 	-- ---------- mentions ----------
 end
@@ -2946,21 +3213,49 @@ do
 	end
 
 	-- ---------- composer behaviour ----------
-	refreshInput = function()
-		if not alive then return end
-		local text = box.Text
-		local length = utf8.len(text) or #text
-		-- the input surface grows with the text (up to ~6 lines, then it scrolls)
+	local TextService = game:GetService("TextService")
+	local measureParams = Instance.new("GetTextBoundsParams")
+	local measureTicket = 0
+	local function measureText(text, width)
+		local ok, size = pcall(function()
+			measureParams.Text = text
+			measureParams.Font = BodyFont
+			measureParams.Size = textSize
+			measureParams.Width = width
+			return TextService:GetTextBoundsAsync(measureParams)
+		end)
+		if ok and typeof(size) == "Vector2" then return size.Y end
+		return nil
+	end
+	local function applyComposerHeight(textHeight)
 		local lineHeight = textSize + 5
-		local textHeight = math.max(box.TextBounds.Y, lineHeight)
-		local boxHeight = math.clamp(math.ceil(textHeight) + 22, 40, 40 + lineHeight * 5)
-		local newHeight = boxHeight + 21
+		-- grows up to ~8 lines (or 40% of the window), then scrolls inside the box
+		local maxText = math.max(lineHeight * 2, math.min(lineHeight * 8, math.floor(win.AbsoluteSize.Y * 0.4)))
+		local boxHeight = math.clamp(math.ceil(textHeight) + 22, 40, maxText + 22)
+		local newHeight = boxHeight + 32
 		if composerHeight ~= newHeight then
 			composerHeight = newHeight
 			box.TextYAlignment = boxHeight > 40 and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center
 			layoutWorkspace()
 			if followLatest[current] then scheduleLatest(current) end
 		end
+	end
+
+	refreshInput = function()
+		if not alive then return end
+		local text = box.Text
+		local length = utf8.len(text) or #text
+		local newlines = select(2, text:gsub("\n", "\n"))
+		-- measure the real wrapped height (Shift+Enter paragraphs, long lines, trailing blank lines)
+		measureTicket += 1
+		local ticket = measureTicket
+		task.spawn(function()
+			local probe = text:sub(-1) == "\n" and (text .. "|") or text
+			local measured = measureText(probe, math.max(60, box.AbsoluteSize.X))
+			if ticket ~= measureTicket or not alive then return end
+			local fallback = (newlines + 1) * (textSize + 5)
+			applyComposerHeight(math.max(box.TextBounds.Y, measured or fallback))
+		end)
 		local nonempty = text:match("%S") ~= nil
 		counter.Text = length >= 7500 and (tostring(length) .. "/" .. MAX_LEN) or ""
 		counter.TextColor3 = length > MAX_LEN and C.bad or C.dim
@@ -2982,6 +3277,7 @@ do
 			end
 		end
 		drafts[current] = box.Text
+		if noteTyping then noteTyping() end
 		refreshInput()
 	end)
 	bind(box:GetPropertyChangedSignal("TextBounds"), function() refreshInput() end)
